@@ -1,0 +1,180 @@
+# ============================================================
+#  GWAS Synthetic Data Pipeline - Configuration
+#  Study: Effect of QC Step Order on GWAS Associations
+# ============================================================
+
+# --- Dataset Scale ---
+n_individuals: 75000          # Total individuals to simulate
+n_snps_autosomal: 95000     # Autosomal SNPs target after MAF filtering (input is 4x this)
+n_snps_chrX: 15000          # chrX SNPs sampled from 1000G (~35% pass MAF filter -> ~5000 final)
+
+# --- 1000 Genomes Reference ---
+reference:
+  population: "EUR"         # Population: EUR, AFR, EAS, SAS, AMR or ALL
+  phase: 3
+  chromosomes: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]
+  # Target SNPs per chromosome fed into msprime thinning step.
+  # Values are scaled 4x above the final desired SNP count to account for
+  # ~74% of variants being removed by MAF filtering (plink_maf_prefilter: 0.001).
+  # chr12 log confirmed: 4500 input -> 1187 passing (26.4% retention rate).
+  # At 4x scale, expected final SNPs after MAF filter: ~95,000 autosomal.
+  #
+  # Final target per chrom (approx):       Input to msprime (4x):
+  #   chr1-2:  ~8,000  each             ->  32,000
+  #   chr3-4:  ~6,500  each             ->  26,000
+  #   chr5-6:  ~6,000  each             ->  24,000
+  #   chr7:    ~5,500                   ->  22,000
+  #   chr8:    ~5,000                   ->  20,000
+  #   chr9-12: ~4,500  each             ->  18,000
+  #   chr13:   ~3,500                   ->  14,000
+  #   chr14-15:~3,000  each             ->  12,000
+  #   chr16-18:~2,500  each             ->  10,000
+  #   chr19-20:~2,000  each             ->   8,000
+  #   chr21-22:~1,500  each             ->   6,000
+  snps_per_chrom:
+    1: 32000
+    2: 32000
+    3: 26000
+    4: 26000
+    5: 24000
+    6: 24000
+    7: 22000
+    8: 20000
+    9: 18000
+    10: 18000
+    11: 18000
+    12: 18000
+    13: 14000
+    14: 12000
+    15: 12000
+    16: 10000
+    17: 10000
+    18: 10000
+    19: 8000
+    20: 8000
+    21: 6000
+    22: 6000
+
+# --- Sex Ratio ---
+sex_ratio:
+  female_fraction: 0.50     # 50% females, 50% males
+
+# --- Sex Distortion (for benchmarking sex-check QC step) ---
+sex_distortion:
+  mode: "random"            # "random" = draw from uniform(min, max); "fixed" = use fixed_pct
+  min_pct: 0.0              # Minimum distortion % (0 = one clean dataset)
+  max_pct: 5.0              # Maximum distortion %
+  n_datasets: 3             # Number of synthetic datasets to generate
+  seed: 42                  # Master random seed (reproducibility)
+  fixed_pct: null           # Only used when mode = "fixed"
+
+# --- Phenotype Simulation ---
+# Simulates lung function z-scores as the GWAS phenotype.
+# Based on GLI-2012 reference equation structure.
+#
+# pheno_subtype options:
+#   "FEV1"      — forced expiratory volume in 1 second (h2 ~0.40)
+#   "FVC"       — forced vital capacity              (h2 ~0.40)
+#   "FEV1_FVC"  — FEV1/FVC ratio                    (h2 ~0.35)
+#
+# Covariates automatically generated:
+#   SEX — from .fam file (0=male, 1=female in regression coding)
+#   AGE — simulated from Normal(55, 8) clamped to [40, 75]
+#
+# Effect sizes match published GWAS literature:
+#   Age:    negative (lung function declines ~0.3 SD per SD of age)
+#   Sex:    moderate (females have lower absolute volumes)
+#   Height: positive (taller individuals have larger lung volumes)
+phenotype:
+  type: "quantitative"       # "quantitative" or "binary"
+  pheno_subtype: "FEV1"      # "FEV1", "FVC", or "FEV1_FVC"
+  n_causal_snps: 50          # Number of autosomal causal SNPs
+  heritability: 0.40         # SNP-based heritability (h2) — FEV1 ~0.40
+  prevalence: 0.30           # Only used if type = "binary"
+  include_population_strat: true
+  stratification_variance: 0.05
+
+# --- Paths ---
+paths:
+  working_dir: "./gwas_synthetic_output"
+  reference_dir: "./reference_data/1000G"
+  hapgen2_bin: "hapgen2"     # No longer used; kept for reference
+  plink2_bin: "plink2"       # Must be in PATH or provide full path
+  plink1_bin: "plink"        # PLINK1.9 — used for merging .bed files (plink2 lacks --merge-list)
+  bcftools_bin: "/home/naveenbhatraju/miniconda3/bin/bcftools"  # full conda path avoids libgsl conflict
+  tabix_bin: "/home/naveenbhatraju/miniconda3/bin/tabix"        # full conda path
+  bgzip_bin: "/home/naveenbhatraju/miniconda3/bin/bgzip"        # full conda path
+  logs_dir: "./gwas_synthetic_output/logs"
+
+# --- msprime Parameters (replaces HAPGEN2) ---
+# HAPGEN2 removed: crashes with std::bad_alloc on modern Linux kernels.
+# msprime uses the same coalescent model and produces equivalent haplotypes.
+msprime:
+  mutation_rate: 1.44e-8                 # Per-base per-generation mutation rate (EUR)
+  demographic_model: "OutOfAfrica_3G09"  # stdpopsim EUR model (pop index 1 = CEU)
+  eur_population_index: 1                # Index of EUR (CEU) pop in OutOfAfrica_3G09
+
+  # ── Speed fix: simulate only a 50MB subregion per chromosome ──
+  # msprime simulates the full chromosome by default (chr1 = 249MB) which
+  # generates millions of variants and takes hours. Limiting to 50MB per
+  # chromosome gives sufficient SNP density while reducing runtime by ~80%.
+  region_length_bp: 50000000             # 50 MB per chromosome
+
+  # ── Space fix: thin tree sequence before writing VCF ──
+  # After simulation msprime still generates more SNPs than needed.
+  # The pipeline thins to snps_per_chrom targets before writing VCF,
+  # keeping per-chromosome VCF files to ~150-300 MB instead of 400+ GB.
+  thin_to_target_snps: true              # Enable pre-VCF thinning
+
+  # ── Speed fix: mutations use multiple threads ──
+  mutation_threads: 4                    # Threads for sim_mutations() step
+
+  # ── Speed fix: parallelise across chromosomes ──
+  # Runs all 22 chromosomes simultaneously instead of sequentially.
+  # Set to min(22, available_cores). With 40 cores, 22 is ideal.
+  n_parallel_chroms: 22
+
+  # ── Space fix: stream VCF directly to bgzip ──
+  # Never writes uncompressed .vcf to disk; pipes directly to bgzip.
+  # Always enabled; flag kept here for documentation purposes only.
+  stream_vcf_compressed: true
+
+  # ── Space fix: delete intermediate VCF after PLINK conversion ──
+  # Each per-chromosome .vcf.gz can be several hundred MB.
+  # Deleted after converting to .pgen to free disk space during the run.
+  delete_vcf_after_conversion: true
+
+# --- HAPGEN2 Parameters (kept for reference, no longer used) ---
+hapgen2:
+  theta: 0.1
+  Ne: 11418   # EUR: 11418 | AFR: 17469 | EAS: 14269
+
+# --- Data Quality Simulation ---
+# Introduces realistic heterogeneous missingness into synthetic genotype data.
+# Without this, msprime produces perfect data with zero missingness — making
+# QC steps like --mind and --geno trivially pass everything.
+#
+# Three-tier missingness model:
+#   1. Background: low uniform missingness across all samples and SNPs
+#   2. Poor-quality samples: ~3% of samples with >15% missing genotypes
+#      -> these should be removed by --mind 0.05 in QC
+#   3. Poor-quality SNPs: ~2% of SNPs with >10% missing genotypes
+#      -> these should be removed by --geno 0.05 in QC
+#
+# Ground-truth files written per replicate for benchmarking:
+#   ground_truth_poor_samples.txt  (IIDs of poor-quality samples)
+#   ground_truth_poor_snps.txt     (SNP IDs of poor-quality SNPs)
+data_quality:
+  enabled: true
+  background_missing_rate: 0.005   # 0.5% uniform missingness across all genotypes
+  poor_sample_fraction:    0.03    # 3% of samples are poor quality
+  poor_sample_miss_rate:   0.15    # poor samples have 15% missing genotypes
+  poor_snp_fraction:       0.02    # 2% of SNPs are poor quality
+  poor_snp_miss_rate:      0.10    # poor SNPs have 10% missing genotypes
+
+# --- Output Formats ---
+output:
+  plink_bed: true            # .bed/.bim/.fam output
+  vcf: false                 # VCF output (large files)
+  include_covariates: true   # Output covariate file (sex, PC1-10)
+  include_causal_snp_list: true  # Ground truth file listing causal SNPs + effect sizes
